@@ -1,0 +1,150 @@
+name: Build and release Klapz
+
+on:
+  push:
+    tags:
+      - "v*"
+      - "*.*.*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release version (for example 1.0.0)"
+        required: true
+        type: string
+      ffmpeg_version:
+        description: "FFmpeg release version (defaults to Klapz version)"
+        required: false
+        type: string
+      web_version:
+        description: "Web release version (defaults to Klapz version)"
+        required: false
+        type: string
+      server_version:
+        description: "Server release version (defaults to Klapz version)"
+        required: false
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  package:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Linux arm64
+            runner: ubuntu-24.04-arm
+            platform: linux
+            arch: arm64
+            package: klapz-linux-arm64
+          - name: Linux x64
+            runner: ubuntu-24.04
+            platform: linux
+            arch: x64
+            package: klapz-linux-x64
+          - name: macOS arm64
+            runner: macos-14
+            platform: darwin
+            arch: arm64
+            package: klapz-darwin-arm64
+          - name: macOS x64
+            runner: macos-13
+            platform: darwin
+            arch: x64
+            package: klapz-darwin-x64
+          - name: Windows x64
+            runner: windows-2022
+            platform: win32
+            arch: x64
+            package: klapz-windows-x64
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Resolve release version
+        id: version
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            VERSION="${{ inputs.version }}"
+          else
+            VERSION="${GITHUB_REF_NAME}"
+          fi
+          VERSION="${VERSION#v}"
+          echo "value=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Assemble package
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          ARGS=(--version "${{ steps.version.outputs.value }}"
+            --platform "${{ matrix.platform }}"
+            --arch "${{ matrix.arch }}"
+            --output "${{ matrix.package }}")
+          if [ -n "${{ inputs.ffmpeg_version }}" ]; then
+            ARGS+=(--ffmpeg-version "${{ inputs.ffmpeg_version }}")
+          fi
+          if [ -n "${{ inputs.web_version }}" ]; then
+            ARGS+=(--web-version "${{ inputs.web_version }}")
+          fi
+          if [ -n "${{ inputs.server_version }}" ]; then
+            ARGS+=(--server-version "${{ inputs.server_version }}")
+          fi
+          node scripts/package-release.js "${ARGS[@]}"
+
+      - name: Create archive
+        shell: bash
+        run: |
+          if [ "${{ matrix.platform }}" = "win32" ]; then
+            powershell -NoProfile -Command 'Compress-Archive -Path "${{ matrix.package }}/*" -DestinationPath "${{ matrix.package }}.zip"'
+          else
+            tar -czf "${{ matrix.package }}.tar.gz" "${{ matrix.package }}"
+          fi
+
+      - name: Upload package artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.package }}
+          path: |
+            ${{ matrix.package }}.zip
+            ${{ matrix.package }}.tar.gz
+          if-no-files-found: error
+
+  release:
+    name: Publish GitHub release
+    needs: package
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Resolve release version
+        id: version
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            VERSION="${{ inputs.version }}"
+          else
+            VERSION="${GITHUB_REF_NAME}"
+          fi
+          echo "value=${VERSION#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Download package artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ steps.version.outputs.value }}
+          files: dist/*
+          generate_release_notes: true
