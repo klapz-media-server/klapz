@@ -152,7 +152,17 @@ function pickAsset(release, platform, arch, component) {
 
 function extractArchive(archive, destination) {
   fs.mkdirSync(destination, { recursive: true });
-  execFileSync("tar", ["-xf", archive, "-C", destination], { stdio: "inherit" });
+  if (process.platform === "win32") {
+    // Windows' own bsdtar reads zip and tar.gz. Called by its full path: under a bash shell,
+    // Git's GNU tar comes first on the PATH and takes `C:\...` for a remote `host:path`.
+    const systemTar = path.join(process.env.SystemRoot || "C:\\Windows", "System32", "tar.exe");
+    execFileSync(systemTar, ["-xf", archive, "-C", destination], { stdio: "inherit" });
+  } else if (/\.zip$/i.test(archive)) {
+    // GNU tar (Linux) cannot read zip files.
+    execFileSync("unzip", ["-q", "-o", archive, "-d", destination], { stdio: "inherit" });
+  } else {
+    execFileSync("tar", ["-xf", archive, "-C", destination], { stdio: "inherit" });
+  }
 }
 
 function findFiles(directory) {
