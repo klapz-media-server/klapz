@@ -1,35 +1,77 @@
+# Builds the Klapz packages from the server, web and FFmpeg releases and puts them in a draft
+# GitHub release, whose notes give the version of each component and its changes since the
+# previous Klapz release. Review the draft, then publish it.
+#
+# GitHub starts no workflow when a draft release is created, so run this one by hand
+# (Actions > Build and release Klapz > Run workflow). If a draft already exists for the tag,
+# it is filled in: its packages are replaced and the text written around the notes is kept.
+
 name: Build and release Klapz
 
 on:
-  push:
-    tags:
-      - "v*"
-      - "*.*.*"
   workflow_dispatch:
     inputs:
       version:
-        description: "Release version (for example 1.0.0)"
-        required: true
+        description: "Klapz version (defaults to today's date, e.g. 2026-11-21)"
+        required: false
         type: string
       ffmpeg_version:
-        description: "FFmpeg release version (defaults to Klapz version)"
+        description: "FFmpeg release version (defaults to its latest release)"
         required: false
         type: string
       web_version:
-        description: "Web release version (defaults to Klapz version)"
+        description: "Web release version (defaults to its latest release)"
         required: false
         type: string
       server_version:
-        description: "Server release version (defaults to Klapz version)"
+        description: "Server release version (defaults to its latest release)"
         required: false
         type: string
 
 permissions:
   contents: write
 
+concurrency:
+  group: release
+
 jobs:
+  resolve:
+    name: Resolve versions
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.resolve.outputs.version }}
+      tag: ${{ steps.resolve.outputs.tag }}
+      ffmpeg: ${{ steps.resolve.outputs.ffmpeg }}
+      web: ${{ steps.resolve.outputs.web }}
+      server: ${{ steps.resolve.outputs.server }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Resolve versions
+        id: resolve
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ inputs.version }}
+          FFMPEG_VERSION: ${{ inputs.ffmpeg_version }}
+          WEB_VERSION: ${{ inputs.web_version }}
+          SERVER_VERSION: ${{ inputs.server_version }}
+        run: |
+          ARGS=()
+          [ -n "$VERSION" ] && ARGS+=(--version "$VERSION")
+          [ -n "$FFMPEG_VERSION" ] && ARGS+=(--ffmpeg-version "$FFMPEG_VERSION")
+          [ -n "$WEB_VERSION" ] && ARGS+=(--web-version "$WEB_VERSION")
+          [ -n "$SERVER_VERSION" ] && ARGS+=(--server-version "$SERVER_VERSION")
+          node scripts/release-notes.js resolve "${ARGS[@]}"
+
   package:
     name: ${{ matrix.name }}
+    needs: resolve
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
@@ -70,37 +112,12 @@ jobs:
         with:
           node-version: 20
 
-      - name: Resolve release version
-        id: version
-        shell: bash
-        run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            VERSION="${{ inputs.version }}"
-          else
-            VERSION="${GITHUB_REF_NAME}"
-          fi
-          VERSION="${VERSION#v}"
-          echo "value=$VERSION" >> "$GITHUB_OUTPUT"
-
       - name: Assemble package
         shell: bash
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          ARGS=(--version "${{ steps.version.outputs.value }}"
-            --platform "${{ matrix.platform }}"
-            --arch "${{ matrix.arch }}"
-            --output "${{ matrix.package }}")
-          if [ -n "${{ inputs.ffmpeg_version }}" ]; then
-            ARGS+=(--ffmpeg-version "${{ inputs.ffmpeg_version }}")
-          fi
-          if [ -n "${{ inputs.web_version }}" ]; then
-            ARGS+=(--web-version "${{ inputs.web_version }}")
-          fi
-          if [ -n "${{ inputs.server_version }}" ]; then
-            ARGS+=(--server-version "${{ inputs.server_version }}")
-          fi
-          node scripts/package-release.js "${ARGS[@]}"
+          node scripts/package-release.js             --version "${{ needs.resolve.outputs.version }}"             --ffmpeg-version "${{ needs.resolve.outputs.ffmpeg }}"             --web-version "${{ needs.resolve.outputs.web }}"             --server-version "${{ needs.resolve.outputs.server }}"             --platform "${{ matrix.platform }}"             --arch "${{ matrix.arch }}"             --output "${{ matrix.package }}"
 
       - name: Create archive
         shell: bash
@@ -121,20 +138,22 @@ jobs:
           if-no-files-found: error
 
   release:
-    name: Publish GitHub release
-    needs: package
+    name: Draft GitHub release
+    needs: [resolve, package]
     runs-on: ubuntu-24.04
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      TAG: ${{ needs.resolve.outputs.tag }}
+      VERSION: ${{ needs.resolve.outputs.version }}
     steps:
-      - name: Resolve release version
-        id: version
-        shell: bash
-        run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            VERSION="${{ inputs.version }}"
-          else
-            VERSION="${GITHUB_REF_NAME}"
-          fi
-          echo "value=${VERSION#v}" >> "$GITHUB_OUTPUT"
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
 
       - name: Download package artifacts
         uses: actions/download-artifact@v4
@@ -142,9 +161,31 @@ jobs:
           path: dist
           merge-multiple: true
 
-      - name: Create GitHub release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: v${{ steps.version.outputs.value }}
-          files: dist/*
-          generate_release_notes: true
+      - name: Find an existing release
+        id: existing
+        run: |
+          if gh release view "$TAG" --json isDraft,body > existing.json 2> /dev/null; then
+            if [ "$(jq -r .isDraft existing.json)" != true ]; then
+              echo "::error::Release $TAG is already published"
+              exit 1
+            fi
+            jq -r .body existing.json > existing-body.md
+            echo "found=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "found=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Write release notes
+        run: |
+          node scripts/release-notes.js notes             --tag "$TAG"             --ffmpeg-version "${{ needs.resolve.outputs.ffmpeg }}"             --web-version "${{ needs.resolve.outputs.web }}"             --server-version "${{ needs.resolve.outputs.server }}"             --existing-body existing-body.md             --output notes.md
+          cat notes.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Create or update the draft
+        run: |
+          (cd dist && sha256sum klapz-* > SHA256SUMS)
+          if [ "${{ steps.existing.outputs.found }}" = true ]; then
+            gh release edit "$TAG" --draft --title "Klapz $VERSION" --notes-file notes.md
+            gh release upload "$TAG" dist/* --clobber
+          else
+            gh release create "$TAG" dist/* --draft --target "$GITHUB_SHA"               --title "Klapz $VERSION" --notes-file notes.md
+          fi
