@@ -1,10 +1,13 @@
-# Builds the Klapz packages from the server, web and FFmpeg releases and puts them in a draft
+# Assembles the Klapz packages from the server, web and FFmpeg releases and puts them in a draft
 # GitHub release, whose notes give the version of each component and its changes since the
 # previous Klapz release. Review the draft, then publish it.
 #
 # GitHub starts no workflow when a draft release is created, so run this one by hand
 # (Actions > Build and release Klapz > Run workflow). If a draft already exists for the tag,
 # it is filled in: its packages are replaced and the text written around the notes is kept.
+#
+# Nothing is compiled here: the packages only gather binaries the other projects have already
+# built, so every platform is assembled on one Linux runner.
 
 name: Build and release Klapz
 
@@ -35,15 +38,12 @@ concurrency:
   group: release
 
 jobs:
-  resolve:
-    name: Resolve versions
+  release:
+    name: Package and draft the release
     runs-on: ubuntu-24.04
-    outputs:
-      version: ${{ steps.resolve.outputs.version }}
-      tag: ${{ steps.resolve.outputs.tag }}
-      ffmpeg: ${{ steps.resolve.outputs.ffmpeg }}
-      web: ${{ steps.resolve.outputs.web }}
-      server: ${{ steps.resolve.outputs.server }}
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -53,10 +53,11 @@ jobs:
         with:
           node-version: 20
 
+      # Once, so that every package and the notes use the same versions even if a component
+      # releases during the run.
       - name: Resolve versions
-        id: resolve
+        id: v
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           VERSION: ${{ inputs.version }}
           FFMPEG_VERSION: ${{ inputs.ffmpeg_version }}
           WEB_VERSION: ${{ inputs.web_version }}
@@ -69,100 +70,36 @@ jobs:
           [ -n "$SERVER_VERSION" ] && ARGS+=(--server-version "$SERVER_VERSION")
           node scripts/release-notes.js resolve "${ARGS[@]}"
 
-  package:
-    name: ${{ matrix.name }}
-    needs: resolve
-    runs-on: ${{ matrix.runner }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - name: Linux arm64
-            runner: ubuntu-24.04-arm
-            platform: linux
-            arch: arm64
-            package: klapz-linux-arm64
-          - name: Linux x64
-            runner: ubuntu-24.04
-            platform: linux
-            arch: x64
-            package: klapz-linux-x64
-          - name: macOS arm64
-            runner: macos-15
-            platform: darwin
-            arch: arm64
-            package: klapz-darwin-arm64
-          - name: macOS x64
-            runner: macos-15-intel
-            platform: darwin
-            arch: x64
-            package: klapz-darwin-x64
-          - name: Windows x64
-            runner: windows-2022
-            platform: win32
-            arch: x64
-            package: klapz-windows-x64
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: 20
-
-      - name: Assemble package
-        shell: bash
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Assemble the packages
         run: |
-          node scripts/package-release.js             --version "${{ needs.resolve.outputs.version }}"             --ffmpeg-version "${{ needs.resolve.outputs.ffmpeg }}"             --web-version "${{ needs.resolve.outputs.web }}"             --server-version "${{ needs.resolve.outputs.server }}"             --platform "${{ matrix.platform }}"             --arch "${{ matrix.arch }}"             --output "${{ matrix.package }}"
-
-      - name: Create archive
-        shell: bash
-        run: |
-          if [ "${{ matrix.platform }}" = "win32" ]; then
-            powershell -NoProfile -Command 'Compress-Archive -Path "${{ matrix.package }}/*" -DestinationPath "${{ matrix.package }}.zip"'
-          else
-            tar -czf "${{ matrix.package }}.tar.gz" "${{ matrix.package }}"
-          fi
-
-      - name: Upload package artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: ${{ matrix.package }}
-          path: |
-            ${{ matrix.package }}.zip
-            ${{ matrix.package }}.tar.gz
-          if-no-files-found: error
-
-  release:
-    name: Draft GitHub release
-    needs: [resolve, package]
-    runs-on: ubuntu-24.04
-    env:
-      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      TAG: ${{ needs.resolve.outputs.tag }}
-      VERSION: ${{ needs.resolve.outputs.version }}
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: 20
-
-      - name: Download package artifacts
-        uses: actions/download-artifact@v4
-        with:
-          path: dist
-          merge-multiple: true
+          mkdir dist
+          for target in linux/x64 linux/arm64 darwin/x64 darwin/arm64 win32/x64; do
+            platform="${target%/*}"
+            arch="${target#*/}"
+            package="klapz-${platform/win32/windows}-$arch"
+            echo "::group::$package"
+            node scripts/package-release.js \
+              --version "${{ steps.v.outputs.version }}" \
+              --ffmpeg-version "${{ steps.v.outputs.ffmpeg }}" \
+              --web-version "${{ steps.v.outputs.web }}" \
+              --server-version "${{ steps.v.outputs.server }}" \
+              --platform "$platform" \
+              --arch "$arch" \
+              --output "$package"
+            if [ "$platform" = win32 ]; then
+              (cd "$package" && zip -qr "../dist/$package.zip" .)
+            else
+              tar -czf "dist/$package.tar.gz" "$package"
+            fi
+            echo "::endgroup::"
+          done
+          (cd dist && sha256sum klapz-* > SHA256SUMS)
+          ls -l dist
 
       - name: Find an existing release
         id: existing
+        env:
+          TAG: ${{ steps.v.outputs.tag }}
         run: |
           if gh release view "$TAG" --json isDraft,body > existing.json 2> /dev/null; then
             if [ "$(jq -r .isDraft existing.json)" != true ]; then
@@ -175,17 +112,26 @@ jobs:
             echo "found=false" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Write release notes
+      - name: Write the release notes
         run: |
-          node scripts/release-notes.js notes             --tag "$TAG"             --ffmpeg-version "${{ needs.resolve.outputs.ffmpeg }}"             --web-version "${{ needs.resolve.outputs.web }}"             --server-version "${{ needs.resolve.outputs.server }}"             --existing-body existing-body.md             --output notes.md
+          node scripts/release-notes.js notes \
+            --tag "${{ steps.v.outputs.tag }}" \
+            --ffmpeg-version "${{ steps.v.outputs.ffmpeg }}" \
+            --web-version "${{ steps.v.outputs.web }}" \
+            --server-version "${{ steps.v.outputs.server }}" \
+            --existing-body existing-body.md \
+            --output notes.md
           cat notes.md >> "$GITHUB_STEP_SUMMARY"
 
       - name: Create or update the draft
+        env:
+          TAG: ${{ steps.v.outputs.tag }}
+          TITLE: Klapz ${{ steps.v.outputs.version }}
         run: |
-          (cd dist && sha256sum klapz-* > SHA256SUMS)
           if [ "${{ steps.existing.outputs.found }}" = true ]; then
-            gh release edit "$TAG" --draft --title "Klapz $VERSION" --notes-file notes.md
+            gh release edit "$TAG" --draft --title "$TITLE" --notes-file notes.md
             gh release upload "$TAG" dist/* --clobber
           else
-            gh release create "$TAG" dist/* --draft --target "$GITHUB_SHA"               --title "Klapz $VERSION" --notes-file notes.md
+            gh release create "$TAG" dist/* --draft --target "$GITHUB_SHA" \
+              --title "$TITLE" --notes-file notes.md
           fi
