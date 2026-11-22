@@ -28,6 +28,23 @@ klapz/
 Windows packages use `.exe`; macOS and Linux packages use executable binaries
 without an extension.
 
+## Run worktrees locally
+
+`scripts/run-worktrees.mjs` starts a `klapz-server` worktree and/or a `klapz-web` worktree
+on their own ports, beside the main checkout's server (32500) and web app (5180), to test a
+branch for real (Node.js 20 or newer):
+
+```bash
+node scripts/run-worktrees.mjs start --server ../klapz-server-wt --web ../klapz-web-wt --name my-branch
+node scripts/run-worktrees.mjs status
+node scripts/run-worktrees.mjs stop --name my-branch
+```
+
+Each instance name keeps its ports in `~/.klapz-dev/instances.json` (servers from 32510, web
+apps from 5181) and never takes a port in use. The server inherits the main checkout's `.env`
+and runs on a copy of its database by default (`--db fresh` or `--db shared` otherwise).
+`--help` lists every option.
+
 ## Build a release package
 
 Packages are assembled by the cross-platform script in `scripts/package-release.js`.
