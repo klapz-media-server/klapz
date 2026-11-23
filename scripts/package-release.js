@@ -265,20 +265,16 @@ async function main() {
     if (args.platform !== "win32") fs.chmodSync(path.join(output, ffmpegName), 0o755);
 
     const serverRelease = await getRelease(REPOSITORIES.server, versions.server);
-    for (const component of ["server", "scanner"]) {
-      const result = await prepareAsset(serverRelease, args.platform, args.arch, component, temporaryDir);
-      let executable = result.assetPath;
-      if (/\.zip$|\.tar\.gz$|\.tgz$/i.test(result.asset.name)) {
-        const extracted = path.join(temporaryDir, `${component}-extracted`);
-        extractArchive(result.assetPath, extracted);
-        executable = findExecutable(findFiles(extracted), `klapz-${component}`, args.platform);
-      }
-      const name = args.platform === "win32"
-        ? `klapz-${component}.exe`
-        : `klapz-${component}`;
-      fs.copyFileSync(executable, path.join(output, name));
-      if (args.platform !== "win32") fs.chmodSync(path.join(output, name), 0o755);
+    const server = await prepareAsset(serverRelease, args.platform, args.arch, "server", temporaryDir);
+    let serverExecutable = server.assetPath;
+    if (/\.zip$|\.tar\.gz$|\.tgz$/i.test(server.asset.name)) {
+      const extracted = path.join(temporaryDir, "server-extracted");
+      extractArchive(server.assetPath, extracted);
+      serverExecutable = findExecutable(findFiles(extracted), "klapz-server", args.platform);
     }
+    const serverName = args.platform === "win32" ? "klapz-server.exe" : "klapz-server";
+    fs.copyFileSync(serverExecutable, path.join(output, serverName));
+    if (args.platform !== "win32") fs.chmodSync(path.join(output, serverName), 0o755);
 
     console.log(`Package assembled at ${output}`);
   } finally {

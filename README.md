@@ -13,15 +13,15 @@ The release pipeline packages binaries from these projects:
 - [klapz-ffmpeg](https://github.com/klapz-media-server/klapz-ffmpeg)
 - [klapz-web](https://github.com/klapz-media-server/klapz-web)
 
-The main server and scanner binaries are downloaded from matching releases and
-packaged with the web application and FFmpeg:
+The server binary is downloaded from a matching release and packaged with the web
+application and FFmpeg, which the server also reads media files with for its library
+scans:
 
 ```text
 klapz/
 ├── web/
 │   └── ...web application...
 ├── klapz-server[.exe]
-├── klapz-scanner[.exe]
 └── klapz-ffmpeg[.exe]
 ```
 
